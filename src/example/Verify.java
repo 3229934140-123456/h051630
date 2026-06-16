@@ -14,6 +14,7 @@ import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
 import java.nio.file.*;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 
 public class Verify {
@@ -34,6 +35,10 @@ public class Verify {
         test(5, "构造方法/<init>/static块/<clinit>/多返回类型 插桩", () -> testMoreMethods(work));
         test(6, "CLI 反汇编输出", () -> testCLIDisasm(work));
         test(7, "CLI roundtrip 输出", () -> testCLIRoundtrip(work));
+        test(8, "精确方法选择（重载：同名不同描述符只改一个）", () -> testExactMethodSelect(work));
+        test(9, "控制流样例反汇编（if/try-catch-finally/字符串switch/稀疏int switch=lookupswitch）", () -> testControlFlowSamples(work));
+        test(10, "对比模式 diff（常量池新增/方法字节码差异）", () -> testDiffMode(work));
+        test(11, "输出文件管理（不覆盖、指定目录、JVM加载验证）", () -> testOutputMgmt(work));
 
         System.out.println("====== 结果: PASS=" + pass + " FAIL=" + fail + " ======");
     }
@@ -364,12 +369,13 @@ public class Verify {
             System.setOut(old);
         }
         String out = baos.toString("UTF-8");
-        if (!out.contains("Roundtrip OK"))
+        if (!out.contains("Output:") || !out.contains("roundtrip"))
             throw new Exception("CLI roundtrip not OK, got: " + out);
         Path rt = work.resolve("p").resolve("Demo2.roundtrip.class");
-        if (!Files.exists(rt))
-            throw new Exception("CLI roundtrip output file not found at " + rt);
-        System.out.println("  CLI roundtrip OK, output at " + rt);
+        Path rt2 = work.resolve("p").resolve("Demo2.roundtrip.1.class");
+        if (!Files.exists(rt) && !Files.exists(rt2))
+            throw new Exception("CLI roundtrip output file not found at " + rt + " or .1.class variant");
+        System.out.println("  CLI roundtrip OK, output at " + (Files.exists(rt) ? rt : rt2));
     }
 
     static int run(String... cmd) throws Exception {
@@ -386,5 +392,250 @@ public class Verify {
             }
         }
         return rc;
+    }
+
+    static void testExactMethodSelect(Path work) throws Exception {
+        Path src = work.resolve("Overload.java");
+        Files.write(src, (
+            "package p;\npublic class Overload {\n" +
+            "  public int calc(int x) { return x + 1; }\n" +
+            "  public int calc(int x, int y) { return x + y; }\n" +
+            "  public String calc(String s) { return s + \"!\"; }\n" +
+            "  public int unused() { return 99; }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path cls = work.resolve("p").resolve("Overload.class");
+
+        Path outDir = work.resolve("exact");
+        Files.createDirectories(outDir);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{
+                "i", cls.toString(), "calc(II)I", "[CALC_II]", "-d", outDir.toString()
+            });
+        } finally {
+            System.setOut(old);
+        }
+        String out = baos.toString("UTF-8");
+        System.out.println("  instrument II report: " + out.replace("\n", " ").replace("\r", " ").substring(0, Math.min(200, out.length())) + "...");
+        if (!out.contains("calc(II)I"))
+            throw new Exception("calc(II)I not reported as instrumented");
+        if (out.contains("calc(I)I") || out.contains("calc(Ljava/lang/String;)Ljava/lang/String;"))
+            throw new Exception("other overloads should NOT be instrumented");
+
+        Path instFile = outDir.resolve("Overload.instrumented.class");
+        Path targetDir = outDir.resolve("p");
+        Files.createDirectories(targetDir);
+        Path moved = targetDir.resolve("Overload.class");
+        Files.copy(instFile, moved, StandardCopyOption.REPLACE_EXISTING);
+
+        Object r1 = loadAndInvoke(outDir, "p.Overload", "calc", new Class[]{int.class}, new Object[]{7});
+        Object r2 = loadAndInvoke(outDir, "p.Overload", "calc", new Class[]{int.class, int.class}, new Object[]{3, 4});
+        Object r3 = loadAndInvoke(outDir, "p.Overload", "calc", new Class[]{String.class}, new Object[]{"hi"});
+        Object r4 = loadAndInvoke(outDir, "p.Overload", "unused", new Class[0], new Object[0]);
+
+        System.out.println("  calc(7)=" + r1 + " (int only, no-print overload)");
+        System.out.println("  calc(3,4)=" + r2 + " (int,int, printed overload)");
+        System.out.println("  calc('hi')=" + r3 + " (String, no-print overload)");
+        System.out.println("  unused()=" + r4 + " (not matched at all)");
+
+        if (!Integer.valueOf(8).equals(r1)) throw new Exception("calc(int) wrong: " + r1);
+        if (!Integer.valueOf(7).equals(r2)) throw new Exception("calc(int,int) wrong: " + r2);
+        if (!"hi!".equals(r3)) throw new Exception("calc(String) wrong: " + r3);
+        if (!Integer.valueOf(99).equals(r4)) throw new Exception("unused() wrong: " + r4);
+        System.out.println("  exact method select: only calc(II)I instrumented; returns all correct");
+    }
+
+    static void testControlFlowSamples(Path work) throws Exception {
+        Path src = work.resolve("Flow.java");
+        Files.write(src, (
+            "package p;\npublic class Flow {\n" +
+            "  public int branch(int x) {\n" +
+            "    if (x > 10) return x - 10;\n" +
+            "    else if (x > 5) return x * 2;\n" +
+            "    else return -x;\n" +
+            "  }\n" +
+            "  public int guarded(String s) {\n" +
+            "    try { int n = s.length(); return n + s.charAt(0); }\n" +
+            "    catch (NullPointerException e) { return -1; }\n" +
+            "    catch (Exception e) { return -2; }\n" +
+            "    finally { System.out.println(\"guarded-end\"); }\n" +
+            "  }\n" +
+            "  public String strSwitch(String k) {\n" +
+            "    switch(k) {\n" +
+            "      case \"red\": return \"R\"; case \"green\": return \"G\"; case \"blue\": return \"B\";\n" +
+            "      default: return \"?\";\n" +
+            "    }\n" +
+            "  }\n" +
+            "  public int sparseSwitch(int x) {\n" +
+            "    switch(x) {\n" +
+            "      case 1: return 10; case 100: return 20; case 10000: return 30; case -500: return 40;\n" +
+            "      default: return 0;\n" +
+            "    }\n" +
+            "  }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path cls = work.resolve("p").resolve("Flow.class");
+        byte[] data = Files.readAllBytes(cls);
+        ClassReader cr = new ClassReader(data);
+        ClassFile cf = cr.read();
+        ConstantPool pool = new ClassReader(data).readConstantPool();
+
+        String fullDisasm = bytecodetool.util.Disassembler.disassemble(cf, pool);
+        String[] lines = fullDisasm.split("\n");
+        System.out.println("  disassembled " + lines.length + " lines total");
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{"d", cls.toString()});
+        } finally {
+            System.setOut(old);
+        }
+        String cliOut = baos.toString("UTF-8");
+        if (!cliOut.contains("Exception table"))
+            throw new Exception("CLI disasm missing Exception table (should appear in guarded())");
+        if (!cliOut.contains("tableswitch") && !cliOut.contains("lookupswitch"))
+            throw new Exception("CLI disasm missing switch instructions");
+
+        boolean hasLookup = false;
+        for (MethodInfo m : cf.methods) {
+            String n = pool.getUtf8(m.nameIndex);
+            CodeAttribute ca = m.getCodeAttribute();
+            if (ca == null) continue;
+            List<Instruction> insns = BytecodeParser.parse(ca.code);
+            for (Instruction in : insns) {
+                if (in.opcode == Opcodes.LOOKUPSWITCH) hasLookup = true;
+                if (in.opcode == Opcodes.LOOKUPSWITCH || in.opcode == Opcodes.TABLESWITCH) {
+                    String fmt = bytecodetool.util.Disassembler.formatInstruction(in, pool, ca.code);
+                    if (!fmt.contains("default:"))
+                        throw new Exception(n + " switch missing default: in format -> " + fmt);
+                }
+                if (in.opcode >= Opcodes.IFEQ && in.opcode <= Opcodes.IF_ACMPNE) {
+                    String fmt = bytecodetool.util.Disassembler.formatInstruction(in, pool, ca.code);
+                    Object op0 = in.operands[0];
+                    int off = op0 instanceof Short ? (Short) op0 : ((Number) op0).intValue();
+                    int target = in.offset + off;
+                    if (!fmt.contains(String.valueOf(target)))
+                        throw new Exception(n + " jump target " + target + " missing in: " + fmt);
+                }
+            }
+        }
+        if (!hasLookup)
+            throw new Exception("sparse switch should compile to lookupswitch but none found");
+        System.out.println("  control flow disasm OK (if/ExceptionTable/lookupswitch+tableswitch/jump targets all visible)");
+    }
+
+    static void testDiffMode(Path work) throws Exception {
+        Path src = work.resolve("DiffBase.java");
+        Files.write(src, (
+            "package p;\npublic class DiffBase {\n" +
+            "  public int foo(int x) { return x + 1; }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path orig = work.resolve("p").resolve("DiffBase.class");
+        Path outDir = work.resolve("diffwork");
+        Files.createDirectories(outDir);
+
+        ByteArrayOutputStream baos1 = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos1, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{
+                "i", orig.toString(), "foo", "[FOO]", "-d", outDir.toString()
+            });
+        } finally {
+            System.setOut(old);
+        }
+
+        Path inst = outDir.resolve("DiffBase.instrumented.class");
+        if (!Files.exists(inst)) throw new Exception("instrumented file not found");
+
+        ByteArrayOutputStream baos2 = new ByteArrayOutputStream();
+        try {
+            System.setOut(new PrintStream(baos2, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{"diff", orig.toString(), inst.toString()});
+        } finally {
+            System.setOut(old);
+        }
+        String out = baos2.toString("UTF-8");
+        System.out.println("  diff output " + out.split("\n").length + " lines");
+        if (!out.contains("Constant pool"))
+            throw new Exception("diff missing constant pool section");
+        if (!out.contains("Methods"))
+            throw new Exception("diff missing methods section");
+        if (!out.contains("getstatic") || !out.contains("println"))
+            throw new Exception("diff not showing inserted bytecode (getstatic/println missing)");
+        if (!out.contains("added entries"))
+            throw new Exception("diff should report added constant pool entries");
+        System.out.println("  diff mode OK (shows cp additions, method bytecode changes)");
+    }
+
+    static void testOutputMgmt(Path work) throws Exception {
+        Path src = work.resolve("Mgmt.java");
+        Files.write(src, (
+            "package p;\npublic class Mgmt {\n" +
+            "  public int m(int x) { return x * 2; }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+        Path cls = work.resolve("p").resolve("Mgmt.class");
+
+        Path customDir = work.resolve("custom");
+        Path customFile = customDir.resolve("MyRenamed.class");
+
+        ByteArrayOutputStream baos1 = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos1, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{
+                "r", cls.toString(), "-o", customFile.toString()
+            });
+        } finally {
+            System.setOut(old);
+        }
+        String r1 = baos1.toString("UTF-8");
+        if (!Files.exists(customFile))
+            throw new Exception("custom output file not created");
+        if (!r1.contains("JVM load") || !r1.contains("OK"))
+            throw new Exception("custom file missing JVM load report, got: " + r1);
+        System.out.println("  custom -o output file created + JVM loaded OK");
+
+        Path noOverwriteDir = work.resolve("noover");
+        Files.createDirectories(noOverwriteDir);
+        for (int k = 0; k < 3; k++) {
+            ByteArrayOutputStream ba = new ByteArrayOutputStream();
+            try {
+                System.setOut(new PrintStream(ba, true, "UTF-8"));
+                bytecodetool.BytecodeTool.main(new String[]{
+                    "r", cls.toString(), "-d", noOverwriteDir.toString()
+                });
+            } finally {
+                System.setOut(old);
+            }
+        }
+        List<Path> produced = new ArrayList<>();
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(noOverwriteDir, "*.class")) {
+            for (Path p : ds) produced.add(p);
+        }
+        if (produced.size() < 3)
+            throw new Exception("expected at least 3 non-overwritten outputs, got " + produced.size());
+        boolean hasNumbered = false;
+        for (Path p : produced) {
+            String fn = p.getFileName().toString();
+            if (fn.contains(".1.") || fn.contains(".2.")) hasNumbered = true;
+            byte[] d = Files.readAllBytes(p);
+            ClassReader cr = new ClassReader(d);
+            if (cr.read() == null) throw new Exception("output file invalid: " + fn);
+        }
+        if (!hasNumbered)
+            throw new Exception("expected .1. .2. suffixed files to prevent overwrite, got: " + produced);
+        System.out.println("  non-overwrite naming OK (got " + produced.size() + " outputs, includes numbered suffixes)");
     }
 }

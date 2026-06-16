@@ -54,7 +54,7 @@ public class Disassembler {
         return sb.toString();
     }
 
-    private static String tagName(int tag) {
+    public static String tagName(int tag) {
         switch (tag) {
             case 1: return "Utf8";
             case 3: return "Integer";
@@ -85,7 +85,7 @@ public class Disassembler {
         }
     }
 
-    private static String describeCp(CpInfo cp, ConstantPool pool) {
+    public static String describeCp(CpInfo cp, ConstantPool pool) {
         if (cp instanceof Utf8Info) return "\"" + ((Utf8Info) cp).value + "\"";
         if (cp instanceof IntegerInfo) return String.valueOf(((IntegerInfo) cp).value);
         if (cp instanceof FloatInfo) return String.valueOf(((FloatInfo) cp).value);
@@ -334,16 +334,16 @@ public class Disassembler {
                 int dim = (Integer) ops[1];
                 sb.append("#").append(idx).append(", ").append(dim).append("  // ").append(pool.getClassName(idx));
             } else if (opcode == Opcodes.GOTO || opcode == Opcodes.JSR) {
-                int off = (Short) ops[0];
+                int off = (Integer) ops[0];
                 sb.append(String.format("%-20s // %d", "", inst.offset + off));
             } else if (opcode == Opcodes.GOTO_W || opcode == Opcodes.JSR_W) {
                 int off = (Integer) ops[0];
                 sb.append(String.format("%-20s // %d", "", inst.offset + off));
             } else if (opcode >= Opcodes.IFEQ && opcode <= Opcodes.IF_ACMPNE) {
-                int off = (Short) ops[0];
+                int off = (Integer) ops[0];
                 sb.append(String.format("%-20s // %d", "", inst.offset + off));
             } else if (opcode == Opcodes.IFNULL || opcode == Opcodes.IFNONNULL) {
-                int off = (Short) ops[0];
+                int off = (Integer) ops[0];
                 sb.append(String.format("%-20s // %d", "", inst.offset + off));
             } else if (opcode == Opcodes.TABLESWITCH) {
                 sb.append("\n");
@@ -360,8 +360,9 @@ public class Disassembler {
             } else if (opcode == Opcodes.LOOKUPSWITCH) {
                 sb.append("\n");
                 int defOff = (Integer) ops[0];
-                int[] keys = (int[]) ops[1];
-                int[] offs = (int[]) ops[2];
+                int npairs = (Integer) ops[1];
+                int[] keys = (int[]) ops[2];
+                int[] offs = (int[]) ops[3];
                 sb.append(String.format("%12s default: %d%n", "", inst.offset + defOff));
                 for (int i = 0; i < keys.length; i++) {
                     sb.append(String.format("%12s %d: %d%n", "", keys[i], inst.offset + offs[i]));
@@ -412,7 +413,7 @@ public class Disassembler {
         }
     }
 
-    private static int frameDelta(StackMapTableAttribute.StackMapFrame f) {
+    public static int frameDelta(StackMapTableAttribute.StackMapFrame f) {
         int ft = f.frameType;
         if (ft >= 0 && ft <= 63) return ft;
         if (ft >= 64 && ft <= 127) return ft - 64;
