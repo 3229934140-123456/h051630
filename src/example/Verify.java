@@ -21,31 +21,42 @@ public class Verify {
     static final String JAVAC = "C:\\Program Files\\JetBrains\\PyCharm 2026.1.2\\jbr\\bin\\javac.exe";
     static final String JAVA  = "C:\\Program Files\\JetBrains\\PyCharm 2026.1.2\\jbr\\bin\\java.exe";
 
+    static int pass = 0, fail = 0;
+
     public static void main(String[] args) throws Exception {
         Path work = Paths.get("target/verify");
         Files.createDirectories(work);
-        int pass = 0, fail = 0;
 
-        System.out.println("====== 1. \u6700\u5c0fclass: \u8bfb\u53d6->\u5199\u56de->JVM\u52a0\u8f7d ======");
-        try { testRoundtrip(work); System.out.println("  [PASS]\n"); pass++; }
-        catch (Exception e) { System.out.println("  [FAIL] " + e.getMessage() + "\n"); fail++; }
+        test(1, "最小class: 读取->写回->JVM加载", () -> testRoundtrip(work));
+        test(2, "multianewarray 解析+写回 (4字节为正确长度)", () -> testMultiArray(work));
+        test(3, "switch 插桩后跳转正确", () -> testSwitch(work));
+        test(4, "if/catch/finally 插桩 (含真正抛出异常的分支)", () -> testIfCatchFinally(work));
+        test(5, "构造方法/<init>/static块/<clinit>/多返回类型 插桩", () -> testMoreMethods(work));
+        test(6, "CLI 反汇编输出", () -> testCLIDisasm(work));
+        test(7, "CLI roundtrip 输出", () -> testCLIRoundtrip(work));
 
-        System.out.println("====== 2. multianewarray \u89e3\u6790+\u5199\u56de ======");
-        try { testMultiArray(work); System.out.println("  [PASS]\n"); pass++; }
-        catch (Exception e) { System.out.println("  [FAIL] " + e.getMessage() + "\n"); fail++; }
-
-        System.out.println("====== 3. switch \u63d2\u6869\u540e\u8df3\u8f6c\u6b63\u786e ======");
-        try { testSwitch(work); System.out.println("  [PASS]\n"); pass++; }
-        catch (Exception e) { System.out.println("  [FAIL] " + e.getMessage() + "\n"); fail++; }
-
-        System.out.println("====== 4. if/catch/finally \u63d2\u6869\u540e JVM \u52a0\u8f7d\u9a8c\u8bc1 ======");
-        try { testIfCatchFinally(work); System.out.println("  [PASS]\n"); pass++; }
-        catch (Exception e) { System.out.println("  [FAIL] " + e.getMessage() + "\n"); fail++; }
-
-        System.out.println("====== \u7ed3\u679c: PASS=" + pass + " FAIL=" + fail + " ======");
+        System.out.println("====== 结果: PASS=" + pass + " FAIL=" + fail + " ======");
     }
 
-    static Object loadAndInvoke(Path classDir, String className, String methodName, Class<?>[] paramTypes, Object[] args) throws Exception {
+    interface TestBody {
+        void run() throws Exception;
+    }
+
+    static void test(int idx, String name, TestBody runnable) {
+        System.out.println("====== " + idx + ". " + name + " ======");
+        try {
+            runnable.run();
+            System.out.println("  [PASS]\n");
+            pass++;
+        } catch (Throwable e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+            System.out.println("  [FAIL] " + msg + "\n");
+            fail++;
+        }
+    }
+
+    static Object loadAndInvoke(Path classDir, String className, String methodName,
+                                Class<?>[] paramTypes, Object[] args) throws Exception {
         URL url = classDir.toUri().toURL();
         URLClassLoader ucl = new URLClassLoader(new URL[]{url}, Verify.class.getClassLoader());
         Class<?> cls = ucl.loadClass(className);
@@ -115,7 +126,9 @@ public class Verify {
             if (next == null) throw new Exception("next instruction not found at pc=" + nextPc);
             System.out.println("  next insn: pc=" + nextPc + " " + Opcodes.getOpcodeName(next.opcode));
 
-            if (multi.length != 4) throw new Exception("multianewarray should be 4 bytes, got " + multi.length);
+            if (multi.length != 4)
+                throw new Exception("multianewarray should be 4 bytes (opcode+2 index+1 dims), got " + multi.length);
+            System.out.println("  multianewarray length=4 is correct (matches JVM spec)");
         }
 
         ClassWriter cw = new ClassWriter(cf, pool);
@@ -188,9 +201,10 @@ public class Verify {
         Path src = work.resolve("ICF.java");
         Files.write(src, (
             "package p;\npublic class ICF {\n" +
-            "  public int process(int x) {\n" +
+            "  public int process(int x, boolean throwIt) {\n" +
             "    int r = 0;\n" +
             "    try {\n" +
+            "      if (throwIt) { throw new RuntimeException(\"bang\"); }\n" +
             "      if (x > 0) { r = x * 2; } else { r = -x; }\n" +
             "    } catch (Exception e) {\n" +
             "      r = -99;\n" +
@@ -220,14 +234,142 @@ public class Verify {
         Files.createDirectories(outDir.resolve("p"));
         Files.write(outDir.resolve("p").resolve("ICF.class"), out);
 
-        Object pos = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class}, new Object[]{5});
-        Object neg = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class}, new Object[]{-3});
-        Object zero = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class}, new Object[]{0});
-        System.out.println("  process(5)=" + pos + " (-3)=" + neg + " (0)=" + zero);
-        if (!Integer.valueOf(11).equals(pos)) throw new Exception("if-branch: expected 11, got " + pos);
-        if (!Integer.valueOf(4).equals(neg)) throw new Exception("else-branch: expected 4, got " + neg);
-        if (!Integer.valueOf(1).equals(zero)) throw new Exception("zero-branch: expected 1, got " + zero);
+        Object pos = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class, boolean.class}, new Object[]{5, false});
+        Object neg = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class, boolean.class}, new Object[]{-3, false});
+        Object zero = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class, boolean.class}, new Object[]{0, false});
+        Object caught = loadAndInvoke(outDir, "p.ICF", "process", new Class[]{int.class, boolean.class}, new Object[]{5, true});
+        System.out.println("  process(5,false)=" + pos + " (-3,false)=" + neg + " (0,false)=" + zero + " (5,true)=" + caught);
+        if (!Integer.valueOf(11).equals(pos)) throw new Exception("if-branch: expected 11 (5*2+1), got " + pos);
+        if (!Integer.valueOf(4).equals(neg)) throw new Exception("else-branch: expected 4 (-(-3)+1), got " + neg);
+        if (!Integer.valueOf(1).equals(zero)) throw new Exception("zero-branch: expected 1 (-0+1), got " + zero);
+        if (!Integer.valueOf(-98).equals(caught)) throw new Exception("catch-branch: expected -98 (-99+1), got " + caught);
         System.out.println("  All branches (if/else/catch/finally) verified correct");
+    }
+
+    static void testMoreMethods(Path work) throws Exception {
+        Path src = work.resolve("Many.java");
+        Files.write(src, (
+            "package p;\npublic class Many {\n" +
+            "  static { System.out.println(\"<clinit> running\"); }\n" +
+            "  public Many() { System.out.println(\"<init> running\"); }\n" +
+            "  public int retInt() { return 42; }\n" +
+            "  public long retLong() { return 123456789012L; }\n" +
+            "  public float retFloat() { return 3.14f; }\n" +
+            "  public double retDouble() { return 2.71828; }\n" +
+            "  public String retString() { return \"hello\"; }\n" +
+            "  public void retVoid() { /* noop */ }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path cls = work.resolve("p").resolve("Many.class");
+        byte[] data = Files.readAllBytes(cls);
+
+        ClassReader cr = new ClassReader(data);
+        ClassFile cf = cr.read();
+        ConstantPool pool = new ClassReader(data).readConstantPool();
+
+        ClassTransformer tx = new ClassTransformer(cf, pool);
+        PrintInstrumenter instr = new PrintInstrumenter("[Many]", pool);
+
+        Set<String> instrumented = new LinkedHashSet<>();
+        for (MethodInfo m : cf.methods) {
+            String name = pool.getUtf8(m.nameIndex);
+            if (m.getCodeAttribute() != null) {
+                tx.instrumentMethod(name, null, instr);
+                instrumented.add(name);
+            }
+        }
+        System.out.println("  instrumented methods: " + instrumented);
+
+        ClassWriter cw = new ClassWriter(cf, pool);
+        byte[] out = cw.write();
+
+        Path outDir = work.resolve("many");
+        Files.createDirectories(outDir.resolve("p"));
+        Files.write(outDir.resolve("p").resolve("Many.class"), out);
+
+        URL url = outDir.toUri().toURL();
+        URLClassLoader ucl = new URLClassLoader(new URL[]{url}, Verify.class.getClassLoader());
+        Class<?> cls2 = ucl.loadClass("p.Many");
+        Object instance = cls2.getDeclaredConstructor().newInstance();
+
+        Object rInt = cls2.getMethod("retInt").invoke(instance);
+        Object rLong = cls2.getMethod("retLong").invoke(instance);
+        Object rFloat = cls2.getMethod("retFloat").invoke(instance);
+        Object rDouble = cls2.getMethod("retDouble").invoke(instance);
+        Object rString = cls2.getMethod("retString").invoke(instance);
+        cls2.getMethod("retVoid").invoke(instance);
+
+        System.out.println("  retInt   = " + rInt);
+        System.out.println("  retLong  = " + rLong);
+        System.out.println("  retFloat = " + rFloat);
+        System.out.println("  retDouble= " + rDouble);
+        System.out.println("  retString= " + rString);
+
+        if (!Integer.valueOf(42).equals(rInt)) throw new Exception("retInt wrong: " + rInt);
+        if (!Long.valueOf(123456789012L).equals(rLong)) throw new Exception("retLong wrong: " + rLong);
+        if (!(rFloat instanceof Float && Math.abs((Float) rFloat - 3.14f) < 0.0001f))
+            throw new Exception("retFloat wrong: " + rFloat);
+        if (!(rDouble instanceof Double && Math.abs((Double) rDouble - 2.71828) < 0.000001))
+            throw new Exception("retDouble wrong: " + rDouble);
+        if (!"hello".equals(rString)) throw new Exception("retString wrong: " + rString);
+
+        System.out.println("  All return types + constructor + static block verified");
+    }
+
+    static void testCLIDisasm(Path work) throws Exception {
+        Path src = work.resolve("Demo.java");
+        Files.write(src, (
+            "package p;\npublic class Demo {\n" +
+            "  public int m(int x) { return x + 1; }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path cls = work.resolve("p").resolve("Demo.class");
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{"d", cls.toString()});
+        } finally {
+            System.setOut(old);
+        }
+        String out = baos.toString("UTF-8");
+        if (!out.contains("Constant pool:"))
+            throw new Exception("CLI disasm missing Constant pool");
+        if (!out.contains("Code:"))
+            throw new Exception("CLI disasm missing Code section");
+        if (!out.contains("stack="))
+            throw new Exception("CLI disasm missing stack/locals info");
+        if (!out.contains("iload_1") && !out.contains("ireturn"))
+            throw new Exception("CLI disasm missing bytecode instructions");
+        System.out.println("  CLI disasm output looks OK (" + out.split("\n").length + " lines)");
+    }
+
+    static void testCLIRoundtrip(Path work) throws Exception {
+        Path src = work.resolve("Demo2.java");
+        Files.write(src, (
+            "package p;\npublic class Demo2 {\n" +
+            "  public int m(int x) { return x + 1; }\n" +
+            "}\n").getBytes("UTF-8"));
+        run(JAVAC, "-d", work.toString(), src.toString());
+
+        Path cls = work.resolve("p").resolve("Demo2.class");
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        PrintStream old = System.out;
+        try {
+            System.setOut(new PrintStream(baos, true, "UTF-8"));
+            bytecodetool.BytecodeTool.main(new String[]{"r", cls.toString()});
+        } finally {
+            System.setOut(old);
+        }
+        String out = baos.toString("UTF-8");
+        if (!out.contains("Roundtrip OK"))
+            throw new Exception("CLI roundtrip not OK, got: " + out);
+        Path rt = work.resolve("p").resolve("Demo2.roundtrip.class");
+        if (!Files.exists(rt))
+            throw new Exception("CLI roundtrip output file not found at " + rt);
+        System.out.println("  CLI roundtrip OK, output at " + rt);
     }
 
     static int run(String... cmd) throws Exception {
