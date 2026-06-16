@@ -506,7 +506,7 @@ public class Opcodes {
                 return 0;
             case I2L: case I2D: case F2L: case F2D:
                 return 1;
-            case L2D: case D2L:
+            case L2D:
                 return 0;
             case I2B: case I2C: case I2S: return 0;
             case LCMP: case FCMPL: case FCMPG: case DCMPL: case DCMPG:

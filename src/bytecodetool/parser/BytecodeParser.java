@@ -102,7 +102,7 @@ public class BytecodeParser {
                 case Opcodes.GOTO: case Opcodes.JSR:
                 case Opcodes.IFNULL: case Opcodes.IFNONNULL:
                     {
-                        int operand = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
+                        int operand = (short) (((code[pc] & 0xFF) << 8) | (code[pc + 1] & 0xFF));
                         inst = new Instruction(opcode, offset, 3, new Object[]{operand});
                         pc += 2;
                     }
@@ -115,22 +115,29 @@ public class BytecodeParser {
                         pc += 2;
                     }
                     break;
-                case Opcodes.INVOKEINTERFACE:
                 case Opcodes.MULTIANEWARRAY:
                     {
-                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
+                        int index = ((code[pc] & 0xFF) << 8) | (code[pc + 1] & 0xFF);
+                        int dimensions = code[pc + 2] & 0xFF;
+                        inst = new Instruction(opcode, offset, 4, new Object[]{index, dimensions});
+                        pc += 3;
+                    }
+                    break;
+                case Opcodes.INVOKEINTERFACE:
+                    {
+                        int index = ((code[pc] & 0xFF) << 8) | (code[pc + 1] & 0xFF);
                         int count = code[pc + 2] & 0xFF;
-                        int fourth = code[pc + 3] & 0xFF;
-                        inst = new Instruction(opcode, offset, 5, new Object[]{index, count, fourth});
+                        int zero = code[pc + 3] & 0xFF;
+                        inst = new Instruction(opcode, offset, 5, new Object[]{index, count, zero});
                         pc += 4;
                     }
                     break;
                 case Opcodes.INVOKEDYNAMIC:
                     {
-                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
+                        int index2 = ((code[pc] & 0xFF) << 8) | (code[pc + 1] & 0xFF);
                         int zero1 = code[pc + 2] & 0xFF;
                         int zero2 = code[pc + 3] & 0xFF;
-                        inst = new Instruction(opcode, offset, 5, new Object[]{index, zero1, zero2});
+                        inst = new Instruction(opcode, offset, 5, new Object[]{index2, zero1, zero2});
                         pc += 4;
                     }
                     break;
@@ -243,8 +250,9 @@ public class BytecodeParser {
             case Opcodes.IFNULL: case Opcodes.IFNONNULL:
             case Opcodes.IINC:
                 return 3;
-            case Opcodes.INVOKEINTERFACE:
             case Opcodes.MULTIANEWARRAY:
+                return 4;
+            case Opcodes.INVOKEINTERFACE:
             case Opcodes.INVOKEDYNAMIC:
             case Opcodes.GOTO_W:
             case Opcodes.JSR_W:
