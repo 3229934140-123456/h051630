@@ -32,13 +32,12 @@ public class ConstantPool {
         this();
         for (int i = 1; i < initialConstants.length; i++) {
             CpInfo cp = initialConstants[i];
-            if (cp != null) {
-                addConstant(cp);
-                if (cp instanceof LongInfo || cp instanceof DoubleInfo) {
+            addConstant(cp);
+            if (cp instanceof LongInfo || cp instanceof DoubleInfo) {
+                i++;
+                if (i < initialConstants.length) {
                     this.constants.add(null);
                 }
-            } else {
-                this.constants.add(null);
             }
         }
         rebuildIndex();

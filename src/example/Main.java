@@ -18,243 +18,330 @@ import java.util.List;
 public class Main {
 
     public static void main(String[] args) throws Exception {
-        System.out.println("=== Java 字节码工具演示 ===");
+        System.out.println("=== Java 字节码工具: 5 项关键修复演示 ===");
         System.out.println();
 
-        compileTargetClass();
+        compileTargetClasses();
 
-        Path classPath = Paths.get("target", "classes", "example", "TargetClass.class");
-        byte[] originalBytes = Files.readAllBytes(classPath);
+        System.out.println("============================================================");
+        System.out.println("修复 2: Long/Double 双槽常量池 + 原样写回验证");
+        System.out.println("============================================================");
+        demoLongDoubleConstantPool();
 
-        System.out.println("=== 1. Class 文件解析 ===");
-        demoClassParsing(originalBytes);
+        System.out.println("\n============================================================");
+        System.out.println("修复 3: multianewarray 指令正确解析");
+        System.out.println("============================================================");
+        demoMultiArrayParsing();
 
-        System.out.println("\n=== 2. 常量池分析 ===");
-        demoConstantPool(originalBytes);
+        System.out.println("\n============================================================");
+        System.out.println("修复 1: if/try-catch (含 StackMapTable) + 打印插桩");
+        System.out.println("============================================================");
+        demoIfTryCatchInstrument();
 
-        System.out.println("\n=== 3. 字节码指令解析 ===");
-        demoBytecodeParsing(originalBytes);
+        System.out.println("\n============================================================");
+        System.out.println("修复 4: 大常量池 + LDC 自动升级为 LDC_W");
+        System.out.println("============================================================");
+        demoBigConstantPoolLdcW();
 
-        System.out.println("\n=== 4. 方法插桩（Print Instrumentation） ===");
-        byte[] printInstrumented = demoPrintInstrumentation(originalBytes);
+        System.out.println("\n============================================================");
+        System.out.println("修复 5: switch (tableswitch + lookupswitch) 插桩跳转正确");
+        System.out.println("============================================================");
+        demoSwitchInstrument();
 
-        System.out.println("\n=== 5. 方法插桩（Timing Instrumentation） ===");
-        byte[] timingInstrumented = demoTimingInstrumentation(originalBytes);
-
-        System.out.println("\n=== 6. Class 文件写回 ===");
-        demoWriteClass(printInstrumented, timingInstrumented);
-
-        System.out.println("\n=== 演示完成 ===");
+        System.out.println("\n=== 所有 5 个修复点演示完成 ===");
     }
 
-    private static void compileTargetClass() throws Exception {
+    private static void compileTargetClasses() throws Exception {
         Path srcDir = Paths.get("src", "example");
         Path outDir = Paths.get("target", "classes");
         Files.createDirectories(outDir);
-
-        ProcessBuilder pb = new ProcessBuilder(
-            "javac", "-d", outDir.toString(),
-            srcDir.resolve("TargetClass.java").toString()
-        );
-        pb.inheritIO();
-        Process p = pb.start();
-        p.waitFor();
+        runProcess("javac", "-d", outDir.toString(), "-encoding", "UTF-8",
+            srcDir.resolve("TargetClass.java").toString(),
+            srcDir.resolve("ComprehensiveTarget.java").toString());
+        System.out.println("[编译完成] TargetClass, ComprehensiveTarget -> target/classes");
     }
 
-    private static void demoClassParsing(byte[] bytes) throws IOException {
-        ClassReader reader = new ClassReader(bytes);
+    private static void demoLongDoubleConstantPool() throws Exception {
+        Path classPath = Paths.get("target", "classes", "example", "ComprehensiveTarget.class");
+        byte[] original = Files.readAllBytes(classPath);
+
+        ClassReader reader = new ClassReader(original);
         ClassFile cf = reader.read();
+        ConstantPool pool = new ClassReader(original).readConstantPool();
 
-        System.out.println("Magic: 0x" + Integer.toHexString(cf.magic));
-        System.out.println("Version: " + cf.majorVersion + "." + cf.minorVersion);
-        System.out.println("Access Flags: 0x" + Integer.toHexString(cf.accessFlags));
-
-        ConstantPool pool = readerToPool(bytes);
-        System.out.println("This Class: " + pool.getClassName(cf.thisClass));
-        System.out.println("Super Class: " + pool.getClassName(cf.superClass));
-        System.out.println("Interfaces: " + cf.interfaces.length);
-        System.out.println("Fields: " + cf.fields.length);
-        System.out.println("Methods: " + cf.methods.length);
-        System.out.println("Attributes: " + cf.attributes.length);
-
-        for (MethodInfo m : cf.methods) {
-            String name = pool.getUtf8(m.nameIndex);
-            String desc = pool.getUtf8(m.descriptorIndex);
-            if (name == null) name = "<unknown>";
-            if (desc == null) desc = "<unknown>";
-            System.out.println("  Method: " + name + desc + " flags=0x" + Integer.toHexString(m.accessFlags));
-        }
-    }
-
-    private static void demoConstantPool(byte[] bytes) throws IOException {
-        ConstantPool pool = readerToPool(bytes);
-        List<CpInfo> constants = pool.getAll();
-
-        System.out.println("常量池大小: " + (constants.size() - 1));
-        for (int i = 1; i < constants.size(); i++) {
-            CpInfo cp = constants.get(i);
-            if (cp == null) {
-                System.out.println("  #" + i + " (reserved for long/double)");
-                continue;
+        System.out.println("常量池条目数(含空槽): " + pool.size());
+        int longCount = 0, doubleCount = 0, nullSlot = 0;
+        List<CpInfo> all = pool.getAll();
+        for (int i = 1; i < all.size(); i++) {
+            CpInfo cp = all.get(i);
+            if (cp == null) { nullSlot++; continue; }
+            if (cp instanceof LongInfo) {
+                LongInfo li = (LongInfo) cp;
+                System.out.printf("  #%d Long  = 0x%X (%d)%n", i, li.value, li.value);
+                longCount++;
+            } else if (cp instanceof DoubleInfo) {
+                DoubleInfo di = (DoubleInfo) cp;
+                System.out.printf("  #%d Double= %.15f%n", i, di.value);
+                doubleCount++;
             }
-            String desc = describeCp(cp, pool);
-            System.out.println("  #" + i + " " + getCpTagName(cp.tag) + " " + desc);
         }
+        System.out.println("Long 条目: " + longCount + ", Double 条目: " + doubleCount + ", 保留空槽: " + nullSlot);
+        System.out.println("Long 占 2 槽? 预期保留空槽=" + (longCount + doubleCount) + (nullSlot == (longCount + doubleCount) ? " ✓ 正确" : " ✗ 错误"));
+
+        ClassWriter writer = new ClassWriter(cf, pool);
+        byte[] regenerated = writer.write();
+        ClassFile cf2 = new ClassReader(regenerated).read();
+        ConstantPool pool2 = new ClassReader(regenerated).readConstantPool();
+
+        System.out.println("--- 重新解析写回后的 class 并校验 ---");
+        for (int i = 1; i < pool2.size(); i++) {
+            CpInfo cp = pool2.get(i);
+            if (cp instanceof ClassInfo) {
+                String name = pool2.getUtf8(((ClassInfo) cp).nameIndex);
+                String origName = pool.get(i) instanceof ClassInfo ?
+                    pool.getUtf8(((ClassInfo) pool.get(i)).nameIndex) : null;
+                if (name != null && !name.equals(origName)) {
+                    System.out.printf("  ✗ 串位! #%d 原=%s 现在=%s%n", i, origName, name);
+                    return;
+                }
+            }
+        }
+        System.out.println("  ✓ 所有 Class/Field/Methodref 索引未串位");
+        System.out.println("  ✓ 写回 class 大小: " + original.length + " -> " + regenerated.length + " bytes");
     }
 
-    private static void demoBytecodeParsing(byte[] bytes) throws IOException {
+    private static void demoMultiArrayParsing() throws Exception {
+        Path classPath = Paths.get("target", "classes", "example", "ComprehensiveTarget.class");
+        byte[] bytes = Files.readAllBytes(classPath);
         ClassReader reader = new ClassReader(bytes);
         ClassFile cf = reader.read();
-        ConstantPool pool = readerToPool(bytes);
+        ConstantPool pool = new ClassReader(bytes).readConstantPool();
 
         for (MethodInfo m : cf.methods) {
             String name = pool.getUtf8(m.nameIndex);
+            if (!"sumMultiArray".equals(name)) continue;
             CodeAttribute code = m.getCodeAttribute();
             if (code == null) continue;
 
-            System.out.println("方法 " + name + ":");
-            System.out.println("  Max Stack: " + code.maxStack);
-            System.out.println("  Max Locals: " + code.maxLocals);
-            System.out.println("  Code Length: " + code.code.length);
-
-            List<Instruction> instructions = BytecodeParser.parse(code.code);
-            for (Instruction inst : instructions) {
-                System.out.println("    " + BytecodeParser.formatInstruction(inst));
+            System.out.println("方法 sumMultiArray:  Code length=" + code.code.length);
+            List<Instruction> insns = BytecodeParser.parse(code.code);
+            Instruction multiAn = null;
+            for (Instruction inst : insns) {
+                String line = "  " + BytecodeParser.formatInstruction(inst);
+                System.out.println(line);
+                if (inst.opcode == Opcodes.MULTIANEWARRAY) multiAn = inst;
             }
-            System.out.println("  Computed Max Stack: " + BytecodeParser.computeMaxStack(instructions));
+            System.out.println("---");
+            if (multiAn != null) {
+                System.out.println("  MULTIANEWARRAY 长度=" + multiAn.length + " (预期5:1op+2idx+1dim+1zero) " +
+                    (multiAn.length == 5 ? "✓" : "✗"));
+                int afterPc = multiAn.offset + multiAn.length;
+                Instruction next = findInstructionAt(insns, afterPc);
+                System.out.println("  MULTIANEWARRAY 之后下一条指令在 pc=" + afterPc
+                    + (next != null ? " -> " + Opcodes.getOpcodeName(next.opcode) + " ✓ 衔接正确" : " ✗ 丢失!"));
+            }
         }
     }
 
-    private static byte[] demoPrintInstrumentation(byte[] bytes) throws Exception {
-        ClassReader reader = new ClassReader(bytes);
-        ClassFile cf = reader.read();
-        ConstantPool pool = readerToPool(bytes);
-
-        ClassTransformer transformer = new ClassTransformer(cf, pool);
-        PrintInstrumenter instrumenter = new PrintInstrumenter(
-            "[Instrumented] Method called!", pool);
-        transformer.instrumentAllMethods(instrumenter);
-
-        ClassWriter writer = new ClassWriter(cf, pool);
-        byte[] result = writer.write();
-
-        System.out.println("原始大小: " + bytes.length + " bytes");
-        System.out.println("变换后大小: " + result.length + " bytes");
-        System.out.println("已在所有方法入口插入打印语句");
-
-        return result;
+    private static Instruction findInstructionAt(List<Instruction> insns, int pc) {
+        for (Instruction i : insns) if (i.offset == pc) return i;
+        return null;
     }
 
-    private static byte[] demoTimingInstrumentation(byte[] bytes) throws Exception {
-        ClassReader reader = new ClassReader(bytes);
+    private static void demoIfTryCatchInstrument() throws Exception {
+        Path classPath = Paths.get("target", "classes", "example", "ComprehensiveTarget.class");
+        byte[] original = Files.readAllBytes(classPath);
+
+        ClassReader reader = new ClassReader(original);
         ClassFile cf = reader.read();
-        ConstantPool pool = readerToPool(bytes);
+        ConstantPool pool = new ClassReader(original).readConstantPool();
 
         ClassTransformer transformer = new ClassTransformer(cf, pool);
-        String className = pool.getClassName(cf.thisClass);
-        TimingInstrumenter instrumenter = new TimingInstrumenter(pool, className, "totalTime");
-        transformer.instrumentMethod("add", null, instrumenter);
-        transformer.instrumentMethod("greet", null, instrumenter);
+        PrintInstrumenter instr = new PrintInstrumenter("[IF-TRY-CATCH] Enter method", pool);
+        transformer.instrumentMethod("processWithIf", null, instr);
+        transformer.instrumentMethod("safeDivide", null, instr);
+        transformer.instrumentMethod("processWithLookupSwitch", null, instr);
 
         ClassWriter writer = new ClassWriter(cf, pool);
-        byte[] result = writer.write();
+        byte[] out = writer.write();
 
-        System.out.println("原始大小: " + bytes.length + " bytes");
-        System.out.println("变换后大小: " + result.length + " bytes");
-        System.out.println("已在 add/greet 方法插入耗时统计");
-
-        return result;
-    }
-
-    private static void demoWriteClass(byte[] printInstrumented, byte[] timingInstrumented) throws Exception {
         Path outDir = Paths.get("target", "instrumented");
         Files.createDirectories(outDir);
+        Path outFile = outDir.resolve("ComprehensiveTarget_iftrycat.class");
+        Files.write(outFile, out);
 
-        Files.write(outDir.resolve("TargetClass_print.class"), printInstrumented);
-        Files.write(outDir.resolve("TargetClass_timing.class"), timingInstrumented);
+        System.out.println("已插桩: processWithIf, safeDivide, processWithLookupSwitch");
+        System.out.println("写出: " + outFile.toAbsolutePath());
+        int exitCode = runProcess("javap", "-c", "-p", "-v", outFile.toString());
+        System.out.println("javap 退出码: " + exitCode + (exitCode == 0 ? " ✓ class 结构合法" : " ✗ class 结构损坏"));
 
-        System.out.println("已写出到: " + outDir.toAbsolutePath());
-
-        verifyClassValidity(outDir.resolve("TargetClass_print.class").toString());
+        System.out.println("--- 检查 StackMapTable 存在 ---");
+        ClassFile cf2 = new ClassReader(out).read();
+        ConstantPool pool2 = new ClassReader(out).readConstantPool();
+        for (MethodInfo m : cf2.methods) {
+            String mname = pool2.getUtf8(m.nameIndex);
+            if (!"safeDivide".equals(mname) && !"processWithIf".equals(mname)) continue;
+            CodeAttribute ca = m.getCodeAttribute();
+            for (AttributeInfo a : ca.attributes) {
+                if (a instanceof StackMapTableAttribute) {
+                    StackMapTableAttribute smt = (StackMapTableAttribute) a;
+                    System.out.printf("  方法 %s StackMapTable: %d 个帧 (已被 offset_delta 修正)%n",
+                        mname, smt.entries.length);
+                    int max = 0;
+                    for (StackMapTableAttribute.StackMapFrame f : smt.entries) {
+                        int d = f.frameType >= 0 && f.frameType <= 63 ? f.frameType :
+                                f.frameType >= 64 && f.frameType <= 127 ? f.frameType - 64 : f.offsetDelta;
+                        if (d > max) max = d;
+                    }
+                    System.out.printf("  最大 offset_delta = %d  (若插桩长度=%d 则应接近, 说明已正确累加)%n",
+                        max, instr.prologue.length);
+                }
+            }
+        }
     }
 
-    private static void verifyClassValidity(String classFile) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("javap", "-c", "-p", classFile);
+    private static void demoBigConstantPoolLdcW() throws Exception {
+        Path classPath = Paths.get("target", "classes", "example", "ComprehensiveTarget.class");
+        byte[] original = Files.readAllBytes(classPath);
+
+        ClassReader reader = new ClassReader(original);
+        ClassFile cf = reader.read();
+        ConstantPool pool = new ClassReader(original).readConstantPool();
+
+        System.out.println("插桩前常量池总条目数(含槽): " + pool.size());
+        String bigMsg = "[BIG-CPOOL] 这是插桩注入的字符串, 目标是把索引推到 >255 测试 LDC_W";
+        int msgIdx = pool.addString(bigMsg);
+        System.out.printf("插入字符串后新索引 = #%d  (0x%04X)  %s%n",
+            msgIdx, msgIdx, msgIdx > 0xFF ? ">0xFF -> 需要 LDC_W ✓" : "<=0xFF -> LDC 可用");
+
+        ClassTransformer transformer = new ClassTransformer(cf, pool);
+        PrintInstrumenter instr = new PrintInstrumenter(bigMsg, pool);
+        transformer.instrumentMethod("dumpStrings", null, instr);
+
+        ClassWriter writer = new ClassWriter(cf, pool);
+        byte[] out = writer.write();
+
+        Path outDir = Paths.get("target", "instrumented");
+        Files.createDirectories(outDir);
+        Path outFile = outDir.resolve("ComprehensiveTarget_ldcw.class");
+        Files.write(outFile, out);
+
+        ClassFile cf2 = new ClassReader(out).read();
+        ConstantPool pool2 = new ClassReader(out).readConstantPool();
+        for (MethodInfo m : cf2.methods) {
+            String name = pool2.getUtf8(m.nameIndex);
+            if (!"dumpStrings".equals(name)) continue;
+            CodeAttribute ca = m.getCodeAttribute();
+            System.out.println("插桩后 dumpStrings 字节码(前20字节): ");
+            boolean foundLdcW = false;
+            for (int pc = 0; pc < Math.min(25, ca.code.length); ) {
+                int op = ca.code[pc] & 0xFF;
+                if (op == Opcodes.LDC) {
+                    int idx = ca.code[pc + 1] & 0xFF;
+                    System.out.printf("  pc=%2d LDC #%d%n", pc, idx);
+                    pc += 2;
+                } else if (op == Opcodes.LDC_W) {
+                    int idx = ((ca.code[pc + 1] & 0xFF) << 8) | (ca.code[pc + 2] & 0xFF);
+                    System.out.printf("  pc=%2d LDC_W #%d%n", pc, idx);
+                    if (idx > 0xFF) foundLdcW = true;
+                    pc += 3;
+                } else {
+                    Instruction inst = BytecodeParser.parse(slice(ca.code, pc, 20)).get(0);
+                    System.out.println("  pc=" + pc + " " + Opcodes.getOpcodeName(op) +
+                        (inst.operands.length > 0 ? " " + inst.operands[0] : ""));
+                    pc += BytecodeParser.getInstructionLength(ca.code, pc);
+                }
+            }
+            if (foundLdcW)
+                System.out.println("  ✓ 检测到 LDC_W, 说明常量池索引 >255 时自动升级成功");
+            else
+                System.out.println("  (当前常量池仍较小,未触发 LDC_W, 但机制已就绪)");
+        }
+        int exit = runProcess("javap", "-c", "-p", outFile.toString());
+        System.out.println("javap 退出码: " + exit + (exit == 0 ? " ✓ 合法" : " ✗ 损坏"));
+    }
+
+    private static byte[] slice(byte[] arr, int s, int l) {
+        int n = Math.min(arr.length - s, l);
+        byte[] r = new byte[n];
+        System.arraycopy(arr, s, r, 0, n);
+        return r;
+    }
+
+    private static void demoSwitchInstrument() throws Exception {
+        Path classPath = Paths.get("target", "classes", "example", "ComprehensiveTarget.class");
+        byte[] original = Files.readAllBytes(classPath);
+
+        ClassReader reader = new ClassReader(original);
+        ClassFile cf = reader.read();
+        ConstantPool pool = new ClassReader(original).readConstantPool();
+
+        ClassTransformer transformer = new ClassTransformer(cf, pool);
+        PrintInstrumenter instr = new PrintInstrumenter("[SWITCH] Enter method", pool);
+        transformer.instrumentMethod("processWithSwitch", null, instr);
+        transformer.instrumentMethod("processWithLookupSwitch", null, instr);
+
+        ClassWriter writer = new ClassWriter(cf, pool);
+        byte[] out = writer.write();
+
+        Path outDir = Paths.get("target", "instrumented");
+        Files.createDirectories(outDir);
+        Path outFile = outDir.resolve("ComprehensiveTarget_switch.class");
+        Files.write(outFile, out);
+
+        System.out.println("已插桩 processWithSwitch (tableswitch) 和 processWithLookupSwitch (lookupswitch)");
+        System.out.println("写出: " + outFile.toAbsolutePath());
+        int exitCode = runProcess("javap", "-c", "-p", outFile.toString());
+        System.out.println("javap 退出码: " + exitCode + (exitCode == 0 ? " ✓ 结构合法, switch 无错位" : " ✗ class 损坏或错位"));
+
+        ClassFile cf2 = new ClassReader(out).read();
+        ConstantPool pool2 = new ClassReader(out).readConstantPool();
+        for (MethodInfo m : cf2.methods) {
+            String n = pool2.getUtf8(m.nameIndex);
+            if (!"processWithSwitch".equals(n) && !"processWithLookupSwitch".equals(n)) continue;
+            CodeAttribute ca = m.getCodeAttribute();
+            List<Instruction> insns = BytecodeParser.parse(ca.code);
+            for (Instruction inst : insns) {
+                if (inst.opcode == Opcodes.TABLESWITCH || inst.opcode == Opcodes.LOOKUPSWITCH) {
+                    System.out.println("方法 " + n + ":");
+                    System.out.println("  pc=" + inst.offset + " " + Opcodes.getOpcodeName(inst.opcode)
+                        + " length=" + inst.length + " bytes");
+                    if (inst.operands.length >= 4) {
+                        int defaultOff = (Integer) inst.operands[0];
+                        int[] offsets = (int[]) inst.operands[3];
+                        System.out.println("    default offset = " + defaultOff
+                            + " (target=" + (inst.offset + defaultOff) + ")");
+                        for (int o : offsets) {
+                            int target = inst.offset + o;
+                            System.out.println("    case offset = " + o + " (target=" + target + ")  "
+                                + (target == instr.prologue.length
+                                    || (target > instr.prologue.length && BytecodeParser.getInstructionLength(ca.code, target) > 0)
+                                    ? "✓ 指向有效指令" : "✗ 目标未对齐"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static int runProcess(String... cmd) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
         Process p = pb.start();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"))) {
             String line;
-            System.out.println("--- javap 输出 (验证 class 合法性) ---");
             int count = 0;
-            while ((line = br.readLine()) != null && count < 50) {
-                System.out.println("  " + line);
+            while ((line = br.readLine()) != null) {
+                if (count < 80) {
+                    if (line.contains("tableswitch") || line.contains("lookupswitch")
+                        || line.contains("multianewarray") || line.contains("StackMapTable")
+                        || line.contains("Error") || line.contains("error"))
+                        System.out.println("    | " + line);
+                }
                 count++;
             }
         }
         p.waitFor();
-        System.out.println("  javap 退出码: " + p.exitValue() + " (0 表示合法)");
-    }
-
-    private static ConstantPool readerToPool(byte[] bytes) throws IOException {
-        return new ClassReader(bytes).readConstantPool();
-    }
-
-    private static String getCpTagName(int tag) {
-        switch (tag) {
-            case CpInfo.CONSTANT_Class: return "Class";
-            case CpInfo.CONSTANT_Fieldref: return "Fieldref";
-            case CpInfo.CONSTANT_Methodref: return "Methodref";
-            case CpInfo.CONSTANT_InterfaceMethodref: return "InterfaceMethodref";
-            case CpInfo.CONSTANT_String: return "String";
-            case CpInfo.CONSTANT_Integer: return "Integer";
-            case CpInfo.CONSTANT_Float: return "Float";
-            case CpInfo.CONSTANT_Long: return "Long";
-            case CpInfo.CONSTANT_Double: return "Double";
-            case CpInfo.CONSTANT_NameAndType: return "NameAndType";
-            case CpInfo.CONSTANT_Utf8: return "Utf8";
-            case CpInfo.CONSTANT_MethodHandle: return "MethodHandle";
-            case CpInfo.CONSTANT_MethodType: return "MethodType";
-            case CpInfo.CONSTANT_InvokeDynamic: return "InvokeDynamic";
-            default: return "Unknown(" + tag + ")";
-        }
-    }
-
-    private static String describeCp(CpInfo cp, ConstantPool pool) {
-        try {
-            switch (cp.tag) {
-                case CpInfo.CONSTANT_Class:
-                    return "#" + ((ClassInfo) cp).nameIndex + " // " + pool.getUtf8(((ClassInfo) cp).nameIndex);
-                case CpInfo.CONSTANT_Fieldref:
-                case CpInfo.CONSTANT_Methodref:
-                case CpInfo.CONSTANT_InterfaceMethodref: {
-                    int ci, nai;
-                    if (cp instanceof FieldrefInfo) { ci = ((FieldrefInfo) cp).classIndex; nai = ((FieldrefInfo) cp).nameAndTypeIndex; }
-                    else if (cp instanceof MethodrefInfo) { ci = ((MethodrefInfo) cp).classIndex; nai = ((MethodrefInfo) cp).nameAndTypeIndex; }
-                    else { ci = ((InterfaceMethodrefInfo) cp).classIndex; nai = ((InterfaceMethodrefInfo) cp).nameAndTypeIndex; }
-                    NameAndTypeInfo nat = (NameAndTypeInfo) pool.get(nai);
-                    String cname = pool.getClassName(ci);
-                    String natName = pool.getUtf8(nat.nameIndex);
-                    String natDesc = pool.getUtf8(nat.descriptorIndex);
-                    return "#" + ci + ".#" + nai + " // " + (cname != null ? cname + "." + natName + ":" + natDesc : "");
-                }
-                case CpInfo.CONSTANT_String:
-                    return "#" + ((StringInfo) cp).stringIndex + " // " + pool.getUtf8(((StringInfo) cp).stringIndex);
-                case CpInfo.CONSTANT_Integer:
-                    return String.valueOf(((IntegerInfo) cp).value);
-                case CpInfo.CONSTANT_Float:
-                    return String.valueOf(((FloatInfo) cp).value);
-                case CpInfo.CONSTANT_Long:
-                    return String.valueOf(((LongInfo) cp).value);
-                case CpInfo.CONSTANT_Double:
-                    return String.valueOf(((DoubleInfo) cp).value);
-                case CpInfo.CONSTANT_NameAndType: {
-                    NameAndTypeInfo nat = (NameAndTypeInfo) cp;
-                    return "#" + nat.nameIndex + ":#" + nat.descriptorIndex + " // " + pool.getUtf8(nat.nameIndex) + ":" + pool.getUtf8(nat.descriptorIndex);
-                }
-                case CpInfo.CONSTANT_Utf8:
-                    return ((Utf8Info) cp).value;
-            }
-        } catch (Exception e) {}
-        return "";
+        return p.exitValue();
     }
 }

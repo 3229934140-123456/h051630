@@ -102,7 +102,7 @@ public class BytecodeParser {
                 case Opcodes.GOTO: case Opcodes.JSR:
                 case Opcodes.IFNULL: case Opcodes.IFNONNULL:
                     {
-                        int operand = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF));
+                        int operand = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
                         inst = new Instruction(opcode, offset, 3, new Object[]{operand});
                         pc += 2;
                     }
@@ -118,16 +118,16 @@ public class BytecodeParser {
                 case Opcodes.INVOKEINTERFACE:
                 case Opcodes.MULTIANEWARRAY:
                     {
-                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF));
+                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
                         int count = code[pc + 2] & 0xFF;
-                        int zero = code[pc + 3] & 0xFF;
-                        inst = new Instruction(opcode, offset, 5, new Object[]{index, count, zero});
+                        int fourth = code[pc + 3] & 0xFF;
+                        inst = new Instruction(opcode, offset, 5, new Object[]{index, count, fourth});
                         pc += 4;
                     }
                     break;
                 case Opcodes.INVOKEDYNAMIC:
                     {
-                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF));
+                        int index = (short) ((code[pc] & 0xFF) << 8 | (code[pc + 1] & 0xFF);
                         int zero1 = code[pc + 2] & 0xFF;
                         int zero2 = code[pc + 3] & 0xFF;
                         inst = new Instruction(opcode, offset, 5, new Object[]{index, zero1, zero2});
@@ -181,7 +181,7 @@ public class BytecodeParser {
                             pc += 4;
                         }
                         int length = 1 + padding + 4 + 4 + 4 + count * 4;
-                        inst = new Instruction(opcode, offset, length, new Object[]{defaultByte, low, high, offsets});
+                        inst = new Instruction(opcode, offset, length, new Object[]{defaultByte, low, high, offsets, padding});
                     }
                     break;
                 case Opcodes.LOOKUPSWITCH:
@@ -206,7 +206,7 @@ public class BytecodeParser {
                             pc += 4;
                         }
                         int length = 1 + padding + 4 + 4 + npairs * 8;
-                        inst = new Instruction(opcode, offset, length, new Object[]{defaultByte, npairs, keys, offsets});
+                        inst = new Instruction(opcode, offset, length, new Object[]{defaultByte, npairs, keys, offsets, padding});
                     }
                     break;
                 default:
@@ -218,11 +218,79 @@ public class BytecodeParser {
         return instructions;
     }
 
+    public static int getInstructionLength(byte[] code, int pc) {
+        int opcode = code[pc] & 0xFF;
+        switch (opcode) {
+            case Opcodes.BIPUSH:
+            case Opcodes.LDC:
+            case Opcodes.ILOAD: case Opcodes.LLOAD: case Opcodes.FLOAD: case Opcodes.DLOAD: case Opcodes.ALOAD:
+            case Opcodes.ISTORE: case Opcodes.LSTORE: case Opcodes.FSTORE: case Opcodes.DSTORE: case Opcodes.ASTORE:
+            case Opcodes.RET:
+            case Opcodes.NEWARRAY:
+                return 2;
+            case Opcodes.SIPUSH:
+            case Opcodes.LDC_W: case Opcodes.LDC2_W:
+            case Opcodes.GETSTATIC: case Opcodes.PUTSTATIC:
+            case Opcodes.GETFIELD: case Opcodes.PUTFIELD:
+            case Opcodes.INVOKEVIRTUAL: case Opcodes.INVOKESPECIAL: case Opcodes.INVOKESTATIC:
+            case Opcodes.NEW: case Opcodes.ANEWARRAY:
+            case Opcodes.CHECKCAST: case Opcodes.INSTANCEOF:
+            case Opcodes.IFEQ: case Opcodes.IFNE: case Opcodes.IFLT: case Opcodes.IFGE: case Opcodes.IFGT: case Opcodes.IFLE:
+            case Opcodes.IF_ICMPEQ: case Opcodes.IF_ICMPNE: case Opcodes.IF_ICMPLT: case Opcodes.IF_ICMPGE:
+            case Opcodes.IF_ICMPGT: case Opcodes.IF_ICMPLE:
+            case Opcodes.IF_ACMPEQ: case Opcodes.IF_ACMPNE:
+            case Opcodes.GOTO: case Opcodes.JSR:
+            case Opcodes.IFNULL: case Opcodes.IFNONNULL:
+            case Opcodes.IINC:
+                return 3;
+            case Opcodes.INVOKEINTERFACE:
+            case Opcodes.MULTIANEWARRAY:
+            case Opcodes.INVOKEDYNAMIC:
+            case Opcodes.GOTO_W:
+            case Opcodes.JSR_W:
+                return 5;
+            case Opcodes.WIDE:
+                int wideOp = code[pc + 1] & 0xFF;
+                return wideOp == Opcodes.IINC ? 6 : 4;
+            case Opcodes.TABLESWITCH:
+            case Opcodes.LOOKUPSWITCH: {
+                int padStart = pc + 1;
+                int aligned = padStart;
+                while (aligned % 4 != 0) aligned++;
+                int padding = aligned - padStart;
+                aligned += 4;
+                if (opcode == Opcodes.TABLESWITCH) {
+                    int low = (code[aligned] & 0xFF) << 24 | (code[aligned + 1] & 0xFF) << 16
+                            | (code[aligned + 2] & 0xFF) << 8 | (code[aligned + 3] & 0xFF);
+                    aligned += 4;
+                    int high = (code[aligned] & 0xFF) << 24 | (code[aligned + 1] & 0xFF) << 16
+                             | (code[aligned + 2] & 0xFF) << 8 | (code[aligned + 3] & 0xFF);
+                    aligned += 4;
+                    int count = high - low + 1;
+                    return 1 + padding + 4 + 4 + 4 + count * 4;
+                } else {
+                    int npairs = (code[aligned] & 0xFF) << 24 | (code[aligned + 1] & 0xFF) << 16
+                               | (code[aligned + 2] & 0xFF) << 8 | (code[aligned + 3] & 0xFF);
+                    aligned += 4;
+                    return 1 + padding + 4 + 4 + npairs * 8;
+                }
+            }
+            default:
+                return 1;
+        }
+    }
+
     public static int computeMaxStack(List<Instruction> instructions) {
         int maxStack = 0;
         int currentStack = 0;
         for (Instruction inst : instructions) {
             currentStack += Opcodes.getStackEffect(inst.opcode);
+            if (inst.opcode == Opcodes.INVOKEVIRTUAL
+                || inst.opcode == Opcodes.INVOKESPECIAL
+                || inst.opcode == Opcodes.INVOKESTATIC
+                || inst.opcode == Opcodes.INVOKEINTERFACE
+                || inst.opcode == Opcodes.INVOKEDYNAMIC) {
+            }
             if (currentStack > maxStack) {
                 maxStack = currentStack;
             }
